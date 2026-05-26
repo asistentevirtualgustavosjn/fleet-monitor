@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monitor de Flota</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f4f0; color: #1a1a18; height: 100vh; display: flex; flex-direction: column; }
+
+  header { background: #fff; border-bottom: 1px solid #e0dfd8; padding: 0 20px; height: 52px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  .logo { font-size: 15px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+  .logo-dot { width: 10px; height: 10px; border-radius: 50%; background: #1D9E75; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .header-right { display: flex; align-items: center; gap: 16px; font-size: 13px; color: #666; }
+  #clock { font-size: 13px; color: #444; font-variant-numeric: tabular-nums; }
+
+  .layout { display: flex; flex: 1; overflow: hidden; }
+
+  #map { flex: 1; z-index: 1; }
+
+  aside { width: 300px; background: #fff; border-left: 1px solid #e0dfd8; display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; }
+
+  .sidebar-section { padding: 14px 16px; border-bottom: 1px solid #f0efe8; }
+  .sidebar-title { font-size: 11px; font-weight: 500; color: #999; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
+
+  .vehicle-card { border: 1px solid #e8e7e0; border-radius: 10px; padding: 12px; margin-bottom: 8px; cursor: pointer; transition: border-color .15s; }
+  .vehicle-card:hover { border-color: #bbb; }
+  .vehicle-card.selected { border-color: #185FA5; background: #f0f6fd; }
+  .vehicle-card.alert { border-color: #E24B4A; background: #fef6f6; }
+  .vc-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .vc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .vc-name { font-size: 14px; font-weight: 500; flex: 1; }
+  .vc-badge { font-size: 11px; padding: 2px 7px; border-radius: 99px; font-weight: 500; }
+  .badge-ok { background: #e1f5ee; color: #085041; }
+  .badge-alert { background: #fcebeb; color: #791F1F; }
+  .vc-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .vc-stat { background: #f8f7f2; border-radius: 6px; padding: 6px 8px; }
+  .vc-stat-label { font-size: 10px; color: #999; margin-bottom: 2px; }
+  .vc-stat-value { font-size: 14px; font-weight: 500; color: #1a1a18; font-variant-numeric: tabular-nums; }
+
+  .alerts-list { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  .alert-item { border-left: 3px solid #e0dfd8; padding: 8px 10px; margin-bottom: 8px; border-radius: 0 6px 6px 0; background: #fafaf8; }
+  .alert-item.alert-out { border-color: #E24B4A; background: #fef6f6; }
+  .alert-item.alert-in { border-color: #1D9E75; background: #f0faf5; }
+  .alert-msg { font-size: 13px; color: #1a1a18; }
+  .alert-time { font-size: 11px; color: #999; margin-top: 3px; }
+
+  .empty-alerts { font-size: 13px; color: #aaa; text-align: center; padding: 24px 0; }
+
+  #connection-status { width: 8px; height: 8px; border-radius: 50%; background: #ccc; }
+  #connection-status.connected { background: #1D9E75; }
+
+  .leaflet-popup-content-wrapper { border-radius: 10px; border: 1px solid #e0dfd8; box-shadow: 0 4px 16px rgba(0,0,0,.1); }
+  .popup-veh { font-family: -apple-system, sans-serif; }
+  .popup-title { font-size: 14px; font-weight: 500; margin-bottom: 6px; }
+  .popup-row { font-size: 12px; color: #666; margin-bottom: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    Monitor de Flota — En vivo
+  </div>
+  <div class="header-right">
+    <div style="display:flex;align-items:center;gap:6px;">
+      <div id="connection-status"></div>
+      <span id="connection-label">Conectando…</span>
+    </div>
+    <span id="clock">--:--:--</span>
+  </div>
+</header>
+
+<div class="layout">
+  <div id="map"></div>
+
+  <aside>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Vehículos</div>
+      <div id="vehicles-list"></div>
+    </div>
+    <div class="sidebar-section" style="padding-bottom:8px;">
+      <div class="sidebar-title">Alertas recientes</div>
+    </div>
+    <div class="alerts-list" id="alerts-list">
+      <div class="empty-alerts">Sin alertas aún</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+const socket = io();
+const map = L.map('map').setView([-25.2900, -57.6400], 13);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap'
+}).addTo(map);
+
+const markers = {};
+const polylines = {};
+const routeLayers = {};
+let vehicleData = {};
+let alerts = [];
+let selectedVehicle = null;
+const MAX_ALERTS = 30;
+
+function makeIcon(color, insideRoute) {
+  const border = insideRoute ? color : '#E24B4A';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="40" viewBox="0 0 32 40">
+    <ellipse cx="16" cy="37" rx="6" ry="3" fill="rgba(0,0,0,.15)"/>
+    <path d="M16 0C9.37 0 4 5.37 4 12c0 9 12 26 12 26s12-17 12-26C28 5.37 22.63 0 16 0z" fill="${border}"/>
+    <circle cx="16" cy="12" r="7" fill="${color}"/>
+    <circle cx="16" cy="12" r="4" fill="white" opacity=".9"/>
+  </svg>`;
+  return L.divIcon({
+    html: svg,
+    iconSize: [32, 40],
+    iconAnchor: [16, 40],
+    popupAnchor: [0, -40],
+    className: ''
+  });
+}
+
+function formatTime(iso) {
+  if (!iso) return '--';
+  const d = new Date(iso);
+  return d.toLocaleTimeString('es-PY');
+}
+
+function drawRoute(vehicleId, polygon, color) {
+  if (routeLayers[vehicleId]) map.removeLayer(routeLayers[vehicleId]);
+  const coords = polygon.map(p => [p.lat, p.lng]);
+  coords.push(coords[0]);
+  routeLayers[vehicleId] = L.polygon(coords, {
+    color: color,
+    fillColor: color,
+    fillOpacity: 0.06,
+    weight: 2,
+    dashArray: '6 4'
+  }).addTo(map);
+}
+
+function updateVehicleCard(v) {
+  vehicleData[v.id] = v;
+  const list = document.getElementById('vehicles-list');
+  let card = document.getElementById('card-' + v.id);
+  if (!card) {
+    card = document.createElement('div');
+    card.id = 'card-' + v.id;
+    card.className = 'vehicle-card';
+    card.onclick = () => focusVehicle(v.id);
+    list.appendChild(card);
+  }
+  card.className = 'vehicle-card' + (v.id === selectedVehicle ? ' selected' : '') + (!v.insideRoute ? ' alert' : '');
+  card.innerHTML = `
+    <div class="vc-header">
+      <div class="vc-dot" style="background:${v.color}"></div>
+      <span class="vc-name">${v.name}</span>
+      <span class="vc-badge ${v.insideRoute ? 'badge-ok' : 'badge-alert'}">${v.insideRoute ? 'En ruta' : 'FUERA'}</span>
+    </div>
+    <div class="vc-stats">
+      <div class="vc-stat">
+        <div class="vc-stat-label">Velocidad</div>
+        <div class="vc-stat-value">${v.speed} km/h</div>
+      </div>
+      <div class="vc-stat">
+        <div class="vc-stat-label">Actualización</div>
+        <div class="vc-stat-value" style="font-size:12px">${formatTime(v.lastUpdate)}</div>
+      </div>
+      <div class="vc-stat" style="grid-column:span 2">
+        <div class="vc-stat-label">Coordenadas</div>
+        <div class="vc-stat-value" style="font-size:12px">${v.lat.toFixed(5)}, ${v.lng.toFixed(5)}</div>
+      </div>
+    </div>`;
+}
+
+function updateMapMarker(v) {
+  const latlng = [v.lat, v.lng];
+  const icon = makeIcon(v.color, v.insideRoute);
+  const popup = `<div class="popup-veh">
+    <div class="popup-title">${v.name}</div>
+    <div class="popup-row">Velocidad: <b>${v.speed} km/h</b></div>
+    <div class="popup-row">Estado: <b>${v.insideRoute ? 'En ruta' : '⚠️ Fuera de ruta'}</b></div>
+    <div class="popup-row">Lat: ${v.lat.toFixed(6)}</div>
+    <div class="popup-row">Lng: ${v.lng.toFixed(6)}</div>
+    <div class="popup-row">Hora: ${formatTime(v.lastUpdate)}</div>
+  </div>`;
+
+  if (markers[v.id]) {
+    markers[v.id].setLatLng(latlng).setIcon(icon).setPopupContent(popup);
+  } else {
+    markers[v.id] = L.marker(latlng, { icon }).bindPopup(popup).addTo(map);
+  }
+
+  // Actualizar rastro
+  if (!polylines[v.id]) {
+    polylines[v.id] = L.polyline([], { color: v.color, weight: 2.5, opacity: 0.55 }).addTo(map);
+  }
+  const pts = v.history ? v.history.map(p => [p.lat, p.lng]) : [[v.lat, v.lng]];
+  polylines[v.id].setLatLngs(pts);
+}
+
+function focusVehicle(id) {
+  selectedVehicle = id;
+  const v = vehicleData[id];
+  if (v) {
+    map.setView([v.lat, v.lng], 15, { animate: true });
+    if (markers[id]) markers[id].openPopup();
+  }
+  Object.keys(vehicleData).forEach(vid => updateVehicleCard(vehicleData[vid]));
+}
+
+function addAlert(alert) {
+  const isEmpty = document.querySelector('.empty-alerts');
+  if (isEmpty) isEmpty.remove();
+
+  alerts.unshift(alert);
+  if (alerts.length > MAX_ALERTS) alerts.pop();
+
+  const list = document.getElementById('alerts-list');
+  const item = document.createElement('div');
+  const cls = alert.type === 'FUERA_DE_RUTA' ? 'alert-out' : 'alert-in';
+  item.className = `alert-item ${cls}`;
+  item.innerHTML = `<div class="alert-msg">${alert.message}</div>
+    <div class="alert-time">${formatTime(alert.time)}</div>`;
+  list.insertBefore(item, list.firstChild);
+
+  while (list.children.length > MAX_ALERTS) list.removeChild(list.lastChild);
+
+  if (alert.type === 'FUERA_DE_RUTA') {
+    if (Notification.permission === 'granted') {
+      new Notification('Alerta de Flota', { body: alert.message });
+    }
+  }
+}
+
+socket.on('connect', () => {
+  document.getElementById('connection-status').className = 'connected';
+  document.getElementById('connection-label').textContent = 'Conectado';
+});
+socket.on('disconnect', () => {
+  document.getElementById('connection-status').className = '';
+  document.getElementById('connection-label').textContent = 'Desconectado';
+});
+
+socket.on('initialState', ({ vehicles, routes }) => {
+  vehicles.forEach(v => {
+    updateVehicleCard(v);
+    updateMapMarker(v);
+  });
+  Object.entries(routes).forEach(([id, poly]) => {
+    const color = vehicleData[id]?.color || '#888';
+    drawRoute(id, poly, color);
+  });
+  const allLatLng = vehicles.map(v => [v.lat, v.lng]);
+  if (allLatLng.length) map.fitBounds(allLatLng, { padding: [40, 40] });
+});
+
+socket.on('vehicleUpdate', v => {
+  updateVehicleCard(v);
+  updateMapMarker(v);
+});
+
+socket.on('alert', alert => {
+  addAlert(alert);
+});
+
+// Pedir permisos de notificación
+if (Notification.permission === 'default') Notification.requestPermission();
+
+// Reloj
+setInterval(() => {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('es-PY');
+}, 1000);
+</script>
+</body>
+</html>
