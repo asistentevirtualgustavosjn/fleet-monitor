@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monitor de Flota</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d0f12;
+    --surface: #151820;
+    --border: #1e2230;
+    --accent: #00e5a0;
+    --accent2: #185FA5;
+    --danger: #ff4d4d;
+    --text: #e8eaf0;
+    --muted: #5a6070;
+    --card: #1a1e2a;
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── HEADER ── */
+  header {
+    height: 48px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    flex-shrink: 0;
+    z-index: 1000;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .logo-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.8)} }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .conn-pill {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+  }
+  #connection-status { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: background .3s; }
+  #connection-status.connected { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  #clock {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── LAYOUT ── */
+  .layout {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* ── MAP — ocupa TODO ── */
+  #map {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+  }
+
+  /* ── PANEL FLOTANTE sobre el mapa ── */
+  #panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 260px;
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 400;
+    pointer-events: none;
+  }
+
+  .panel-block {
+    background: rgba(21, 24, 32, 0.92);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    pointer-events: all;
+  }
+
+  .block-title {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 10px 14px 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Vehicles */
+  .vehicle-card {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .vehicle-card:last-child { border-bottom: none; }
+  .vehicle-card:hover { background: rgba(255,255,255,.04); }
+  .vehicle-card.selected { background: rgba(0,229,160,.06); }
+  .vehicle-card.alert { background: rgba(255,77,77,.06); }
+
+  .vc-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 7px;
+  }
+  .vc-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .vc-name { font-size: 13px; font-weight: 600; flex: 1; }
+  .vc-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 99px;
+    font-weight: 600;
+    font-family: 'DM Mono', monospace;
+  }
+  .badge-ok { background: rgba(0,229,160,.15); color: var(--accent); }
+  .badge-alert { background: rgba(255,77,77,.15); color: var(--danger); }
+
+  .vc-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+  }
+  .vc-stat {
+    background: rgba(255,255,255,.04);
+    border-radius: 6px;
+    padding: 5px 7px;
+  }
+  .vc-stat-label { font-size: 9px; color: var(--muted); margin-bottom: 1px; text-transform: uppercase; letter-spacing: .04em; }
+  .vc-stat-value { font-size: 12px; font-weight: 500; font-family: 'DM Mono', monospace; }
+
+  /* Alerts */
+  .alerts-scroll {
+    max-height: 160px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .alert-item {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    border-left: 3px solid transparent;
+  }
+  .alert-item:last-child { border-bottom: none; }
+  .alert-item.alert-out { border-left-color: var(--danger); }
+  .alert-item.alert-in { border-left-color: var(--accent); }
+  .alert-msg { font-size: 11px; color: var(--text); line-height: 1.4; }
+  .alert-time { font-size: 10px; color: var(--muted); margin-top: 2px; font-family: 'DM Mono', monospace; }
+  .empty-alerts { font-size: 11px; color: var(--muted); text-align: center; padding: 16px; }
+
+  /* ── TOGGLE en móvil ── */
+  #panel-toggle {
+    display: none;
+    position: absolute;
+    bottom: 20px;
+    right: 16px;
+    z-index: 500;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 99px;
+    padding: 10px 18px;
+    font-size: 12px;
+    font-weight: 700;
+    font-family: 'DM Sans', sans-serif;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(0,229,160,.4);
+    letter-spacing: .04em;
+  }
+
+  /* ── RESPONSIVE MÓVIL ── */
+  @media (max-width: 600px) {
+    #panel {
+      top: auto;
+      bottom: 60px;
+      right: 0;
+      left: 0;
+      width: 100%;
+      max-height: 55vh;
+      padding: 0 10px;
+      transition: transform .3s ease, opacity .3s ease;
+    }
+    #panel.hidden {
+      transform: translateY(120%);
+      opacity: 0;
+      pointer-events: none;
+    }
+    #panel-toggle { display: flex; align-items: center; gap: 6px; }
+  }
+
+  .leaflet-popup-content-wrapper {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    color: var(--text);
+  }
+  .leaflet-popup-tip { background: var(--surface); }
+  .popup-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .popup-row { font-size: 11px; color: var(--muted); margin-bottom: 3px; font-family: 'DM Mono', monospace; }
+  .popup-row b { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    Monitor de Flota
+  </div>
+  <div class="header-right">
+    <div class="conn-pill">
+      <div id="connection-status"></div>
+      <span id="connection-label">Conectando…</span>
+    </div>
+    <span id="clock">--:--:--</span>
+  </div>
+</header>
+
+<div class="layout">
+  <div id="map"></div>
+
+  <div id="panel">
+    <div class="panel-block">
+      <div class="block-title">Vehículos</div>
+      <div id="vehicles-list"></div>
+    </div>
+    <div class="panel-block">
+      <div class="block-title">Alertas recientes</div>
+      <div class="alerts-scroll">
+        <div class="alerts-list" id="alerts-list">
+          <div class="empty-alerts">Sin alertas aún</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button id="panel-toggle" onclick="togglePanel()">☰ Ver panel</button>
+</div>
+
+<script>
+let panelVisible = false;
+function togglePanel() {
+  panelVisible = !panelVisible;
+  const panel = document.getElementById('panel');
+  const btn = document.getElementById('panel-toggle');
+  if (panelVisible) {
+    panel.classList.remove('hidden');
+    btn.textContent = '✕ Cerrar';
+  } else {
+    panel.classList.add('hidden');
+    btn.textContent = '☰ Ver panel';
+  }
+}
+
+// En móvil, panel oculto por defecto
+if (window.innerWidth <= 600) {
+  document.getElementById('panel').classList.add('hidden');
+}
+
+const socket = io();
+const map = L.map('map').setView([-25.2900, -57.6400], 13);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap'
+}).addTo(map);
+
+const markers = {};
+const polylines = {};
+const routeLayers = {};
+let vehicleData = {};
+let alerts = [];
+let selectedVehicle = null;
+const MAX_ALERTS = 30;
+
+function makeIcon(color, insideRoute) {
+  const border = insideRoute ? color : '#ff4d4d';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="40" viewBox="0 0 32 40">
+    <ellipse cx="16" cy="37" rx="6" ry="3" fill="rgba(0,0,0,.3)"/>
+    <path d="M16 0C9.37 0 4 5.37 4 12c0 9 12 26 12 26s12-17 12-26C28 5.37 22.63 0 16 0z" fill="${border}"/>
+    <circle cx="16" cy="12" r="7" fill="${color}"/>
+    <circle cx="16" cy="12" r="4" fill="white" opacity=".9"/>
+  </svg>`;
+  return L.divIcon({ html: svg, iconSize: [32,40], iconAnchor: [16,40], popupAnchor: [0,-40], className: '' });
+}
+
+function formatTime(iso) {
+  if (!iso) return '--';
+  return new Date(iso).toLocaleTimeString('es-PY');
+}
+
+function drawRoute(vehicleId, polygon, color) {
+  if (routeLayers[vehicleId]) map.removeLayer(routeLayers[vehicleId]);
+  const coords = polygon.map(p => [p.lat, p.lng]);
+  coords.push(coords[0]);
+  routeLayers[vehicleId] = L.polygon(coords, {
+    color, fillColor: color, fillOpacity: 0.08, weight: 2, dashArray: '6 4'
+  }).addTo(map);
+}
+
+function updateVehicleCard(v) {
+  vehicleData[v.id] = v;
+  const list = document.getElementById('vehicles-list');
+  let card = document.getElementById('card-' + v.id);
+  if (!card) {
+    card = document.createElement('div');
+    card.id = 'card-' + v.id;
+    card.onclick = () => focusVehicle(v.id);
+    list.appendChild(card);
+  }
+  card.className = 'vehicle-card' + (v.id === selectedVehicle ? ' selected' : '') + (!v.insideRoute ? ' alert' : '');
+  card.innerHTML = `
+    <div class="vc-header">
+      <div class="vc-dot" style="background:${v.color}"></div>
+      <span class="vc-name">${v.name}</span>
+      <span class="vc-badge ${v.insideRoute ? 'badge-ok' : 'badge-alert'}">${v.insideRoute ? 'En ruta' : 'FUERA'}</span>
+    </div>
+    <div class="vc-stats">
+      <div class="vc-stat">
+        <div class="vc-stat-label">Velocidad</div>
+        <div class="vc-stat-value">${v.speed} km/h</div>
+      </div>
+      <div class="vc-stat">
+        <div class="vc-stat-label">Hora</div>
+        <div class="vc-stat-value" style="font-size:10px">${formatTime(v.lastUpdate)}</div>
+      </div>
+      <div class="vc-stat" style="grid-column:span 2">
+        <div class="vc-stat-label">Coordenadas</div>
+        <div class="vc-stat-value" style="font-size:10px">${v.lat.toFixed(5)}, ${v.lng.toFixed(5)}</div>
+      </div>
+    </div>`;
+}
+
+function updateMapMarker(v) {
+  const latlng = [v.lat, v.lng];
+  const icon = makeIcon(v.color, v.insideRoute);
+  const popup = `<div>
+    <div class="popup-title">${v.name}</div>
+    <div class="popup-row">Velocidad: <b>${v.speed} km/h</b></div>
+    <div class="popup-row">Estado: <b>${v.insideRoute ? '✓ En ruta' : '⚠ Fuera de ruta'}</b></div>
+    <div class="popup-row">Lat: <b>${v.lat.toFixed(6)}</b></div>
+    <div class="popup-row">Lng: <b>${v.lng.toFixed(6)}</b></div>
+    <div class="popup-row">Hora: <b>${formatTime(v.lastUpdate)}</b></div>
+  </div>`;
+  if (markers[v.id]) {
+    markers[v.id].setLatLng(latlng).setIcon(icon).setPopupContent(popup);
+  } else {
+    markers[v.id] = L.marker(latlng, { icon }).bindPopup(popup).addTo(map);
+  }
+  if (!polylines[v.id]) {
+    polylines[v.id] = L.polyline([], { color: v.color, weight: 2.5, opacity: 0.6 }).addTo(map);
+  }
+  const pts = v.history ? v.history.map(p => [p.lat, p.lng]) : [[v.lat, v.lng]];
+  polylines[v.id].setLatLngs(pts);
+}
+
+function focusVehicle(id) {
+  selectedVehicle = id;
+  const v = vehicleData[id];
+  if (v) {
+    map.setView([v.lat, v.lng], 15, { animate: true });
+    if (markers[id]) markers[id].openPopup();
+  }
+  Object.keys(vehicleData).forEach(vid => updateVehicleCard(vehicleData[vid]));
+}
+
+function addAlert(alert) {
+  const isEmpty = document.querySelector('.empty-alerts');
+  if (isEmpty) isEmpty.remove();
+  alerts.unshift(alert);
+  if (alerts.length > MAX_ALERTS) alerts.pop();
+  const list = document.getElementById('alerts-list');
+  const item = document.createElement('div');
+  item.className = `alert-item ${alert.type === 'FUERA_DE_RUTA' ? 'alert-out' : 'alert-in'}`;
+  item.innerHTML = `<div class="alert-msg">${alert.message}</div>
+    <div class="alert-time">${formatTime(alert.time)}</div>`;
+  list.insertBefore(item, list.firstChild);
+  while (list.children.length > MAX_ALERTS) list.removeChild(list.lastChild);
+  if (alert.type === 'FUERA_DE_RUTA' && Notification.permission === 'granted') {
+    new Notification('Alerta de Flota', { body: alert.message });
+  }
+}
+
+socket.on('connect', () => {
+  document.getElementById('connection-status').className = 'connected';
+  document.getElementById('connection-label').textContent = 'Conectado';
+});
+socket.on('disconnect', () => {
+  document.getElementById('connection-status').className = '';
+  document.getElementById('connection-label').textContent = 'Desconectado';
+});
+socket.on('initialState', ({ vehicles, routes }) => {
+  vehicles.forEach(v => { updateVehicleCard(v); updateMapMarker(v); });
+  Object.entries(routes).forEach(([id, poly]) => {
+    drawRoute(id, poly, vehicleData[id]?.color || '#888');
+  });
+  const allLatLng = vehicles.map(v => [v.lat, v.lng]);
+  if (allLatLng.length) map.fitBounds(allLatLng, { padding: [40, 40] });
+});
+socket.on('vehicleUpdate', v => { updateVehicleCard(v); updateMapMarker(v); });
+socket.on('alert', alert => { addAlert(alert); });
+
+if (Notification.permission === 'default') Notification.requestPermission();
+setInterval(() => {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('es-PY');
+}, 1000);
+</script>
+</body>
+</html>
